@@ -1,0 +1,23 @@
+<svg width="240" height="56" viewBox="0 0 240 56" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="novatextgrad" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#6366F1"/>
+      <stop offset="50%" stop-color="#8B5CF6"/>
+      <stop offset="100%" stop-color="#EC4899"/>
+    </linearGradient>
+  </defs>
+  <!-- Icon Mark -->
+  <g transform="translate(4, 4)">
+    <rect width="48" height="48" rx="12" fill="#111827" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
+    <path d="M14 36V12L23 12L31 27V12H37V36H28L20 21V36H14Z" fill="url(#novatextgrad)"/>
+    <path d="M11 33L39 15" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" opacity="0.95"/>
+    <circle cx="25" cy="24" r="2.5" fill="#FFFFFF"/>
+  </g>
+  <!-- Brand Wordmark -->
+  <text x="64" y="37" font-family="'Geist', 'Segoe UI', system-ui, -apple-system, sans-serif" font-size="26" font-weight="800" letter-spacing="-0.03em">
+    <tspan fill="#F8FAFC">Nova</tspan><tspan fill="url(#novatextgrad)">Cut</tspan>
+  </text>
+  <!-- Studio Tag -->
+  <rect x="180" y="18" width="52" height="20" rx="4" fill="rgba(99,102,241,0.18)" stroke="rgba(99,102,241,0.4)" stroke-width="1"/>
+  <text x="206" y="32" font-family="'Geist', system-ui, sans-serif" font-size="10" font-weight="700" fill="#A5B4FC" text-anchor="middle" letter-spacing="0.05em">STUDIO</text>
+</svg>
