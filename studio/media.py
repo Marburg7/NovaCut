@@ -357,7 +357,12 @@ def probe(path: Path) -> dict:
     rot = str((v.get("side_data_list") or [{}])[0].get("rotation", "0"))
     if rot.lstrip("-") in ("90", "270"):
         w, h = h, w
-    return {"width": w, "height": h, "duration": float(data["format"]["duration"])}
+    raw_dur = (data.get("format") or {}).get("duration") or v.get("duration") or 0
+    try:
+        dur = float(raw_dur)
+    except (TypeError, ValueError):
+        dur = 0.0
+    return {"width": w, "height": h, "duration": dur}
 
 
 def extract_audio(src: Path, wav: Path):

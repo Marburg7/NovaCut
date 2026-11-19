@@ -134,6 +134,8 @@ class Session:
         self.tokens = 0
         self.manual = []
         self.n = 0
+        self._last_sample_wall = 0.0
+        self._initial_check_done = False
         self.spike = None             # a jump in loudness/chat/viral score waiting for post-roll & transcript
         self.said = None              # someone said "clip": that moment, waiting for its transcript
         self.last_said = -999.0
@@ -207,57 +209,78 @@ class Session:
         if self.proc and self.proc.poll() is None:
             self.proc.terminate()
 
+    def stream_clock(self) -> float:
+        base = self.samples / SR
+        if self.samples > 0 and not self.ended and self._last_sample_wall > 0:
+            return base + min(2.5, max(0.0, time.time() - self._last_sample_wall))
+        return base
+
     def _ingest(self):
         fails = 0
         url = self.job["source"]["url"]
-        while not self.stop_flag.is_set():
-            try:
-                info = resolve(url)
-            except NotLive as e:
-                fails += 1
-                if self.samples == 0 or fails >= 3:
-                    if self.samples == 0:
-                        self.job["error"] = f"Could not start recording: {e}"
-                    break
-                self.stop_flag.wait(10)
-                continue
-            if not self.job.get("uploader"):
-                self.job.update(title=info["title"], uploader=info["uploader"])
-            self.part += 1
-            with self.lock:
-                self.seg_clock = max(self.seg_clock, self.samples / SR)
-            p = f"p{self.part:02d}"
-            cmd = ["ffmpeg", "-v", "error", "-reconnect", "1", "-reconnect_streamed", "1",
-                   "-reconnect_delay_max", "10"]
-            for u in info["urls"]:
-                cmd += ["-i", u]
-            a_in = "1:a:0" if len(info["urls"]) > 1 else "0:a:0"
-            cmd += ["-map", "0:v:0", "-map", a_in, "-c", "copy", "-f", "segment", "-segment_time", str(SEG_SEC),
-                    "-reset_timestamps", "1", "-segment_format", "mpegts", "-segment_list", f"{p}.csv",
-                    "-segment_list_type", "csv", f"{p}_%05d.ts",
-                    "-map", a_in, "-vn", "-ac", "1", "-ar", str(SR), "-f", "s16le", "pipe:1"]
-            with open(self.dir / "ffmpeg.log", "ab") as errlog:
-                self.proc = subprocess.Popen(cmd, cwd=self.buf, stdout=subprocess.PIPE, stderr=errlog,
-                                             creationflags=media.NO_WINDOW)
-                got = 0
-                while True:
-                    data = self.proc.stdout.read(SR * 2)  # one second of 16-bit mono
-                    if not data:
+        try:
+            while not self.stop_flag.is_set():
+                try:
+                    info = resolve(url)
+                except NotLive as e:
+                    fails += 1
+                    if self.samples == 0 or fails >= 3:
+                        if self.samples == 0:
+                            self.job["error"] = f"Could not start recording: {e}"
                         break
-                    data = data[: len(data) // 2 * 2]
-                    got += len(data)
-                    x = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
-                    level = float(20 * np.log10(np.sqrt((x ** 2).mean() + 1e-10))) if len(x) else -100.0
-                    with self.lock:
-                        self.pending += data
-                        self.samples += len(data) // 2
-                        self.db.append(level)
-                self.proc.wait()
-            fails = 0 if got > SR * 2 * 20 else fails + 1
-            if fails >= 3:
-                break
-            self.stop_flag.wait(3)
-        self.ended = True
+                    self.stop_flag.wait(10)
+                    continue
+                if not self.job.get("uploader"):
+                    self.job.update(title=info["title"], uploader=info["uploader"])
+                    jobs.save(self.job)
+                self.part += 1
+                with self.lock:
+                    self.seg_clock = max(self.seg_clock, self.samples / SR)
+                p = f"p{self.part:02d}"
+                cmd = ["ffmpeg", "-v", "error"]
+                for u in info["urls"]:
+                    if str(u).startswith(("http://", "https://")):
+                        cmd += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "10"]
+                    cmd += ["-i", u]
+                a_in = "1:a:0" if len(info["urls"]) > 1 else "0:a:0"
+                cmd += ["-map", "0:v:0", "-map", a_in, "-c", "copy", "-f", "segment", "-segment_time", str(SEG_SEC),
+                        "-reset_timestamps", "1", "-segment_format", "mpegts", "-segment_list", f"{p}.csv",
+                        "-segment_list_type", "csv", f"{p}_%05d.ts",
+                        "-map", a_in, "-vn", "-ac", "1", "-ar", str(SR), "-f", "s16le", "pipe:1"]
+                with open(self.dir / "ffmpeg.log", "ab") as errlog:
+                    self.proc = subprocess.Popen(cmd, cwd=self.buf, stdout=subprocess.PIPE, stderr=errlog,
+                                                 creationflags=media.NO_WINDOW)
+                    got = 0
+                    while True:
+                        data = self.proc.stdout.read(SR * 2)  # one second of 16-bit mono
+                        if not data:
+                            break
+                        data = data[: len(data) // 2 * 2]
+                        got += len(data)
+                        x = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+                        level = float(20 * np.log10(np.sqrt((x ** 2).mean() + 1e-10))) if len(x) else -100.0
+                        with self.lock:
+                            self.pending += data
+                            self.samples += len(data) // 2
+                            self.db.append(level)
+                            self._last_sample_wall = time.time()
+                    self.proc.wait()
+                fails = 0 if got > SR * 2 * 20 else fails + 1
+                if not self.stop_flag.is_set() and fails >= 3:
+                    if self.samples < SR * 5 and not self.job.get("error"):
+                        try:
+                            err_lines = [ln.strip() for ln in (self.dir / "ffmpeg.log").read_text(encoding="utf-8", errors="ignore").splitlines() if ln.strip()]
+                        except OSError:
+                            err_lines = []
+                        clean_errs = [ln for ln in err_lines if not ln.startswith("Error opening input file http") and "Error opening input files:" not in ln]
+                        last_err = clean_errs[-1] if clean_errs else (err_lines[-1] if err_lines else f"Stream recording stopped unexpectedly (exit code {self.proc.returncode}).")
+                        self.job["error"] = f"Could not record stream: {media_safe(last_err)}"
+                    break
+                if fails >= 3:
+                    break
+                self.stop_flag.wait(3)
+        finally:
+            self.ended = True
 
     def _pinned_ranges(self) -> list:
         """Time ranges (start, end) that must NOT be pruned from the rolling buffer because a viral moment,
@@ -285,19 +308,41 @@ class Session:
     def _scan_segments(self):
         """Pick up buffer pieces ffmpeg has finished writing, while preserving any pinned pre-roll segments."""
         with self.lock:
+            seen_names = {s[0].name for s in self.segments}
             for i in range(1, self.part + 1):
                 f = self.buf / f"p{i:02d}.csv"
-                if not f.exists():
-                    continue
-                rows = [r.split(",") for r in f.read_text(encoding="utf-8", errors="ignore").splitlines() if r.count(",") >= 2]
-                for name, a, b in (r[:3] for r in rows[self.csv_seen.get(i, 0):]):
-                    try:
-                        dur = max(0.0, float(b) - float(a))
-                    except ValueError:
-                        continue
-                    self.segments.append((self.buf / name, self.seg_clock, self.seg_clock + dur))
-                    self.seg_clock += dur
-                self.csv_seen[i] = len(rows)
+                if f.exists():
+                    rows = [r.split(",") for r in f.read_text(encoding="utf-8", errors="ignore").splitlines() if r.count(",") >= 2]
+                    for name, a, b in (r[:3] for r in rows[self.csv_seen.get(i, 0):]):
+                        try:
+                            dur = max(0.0, float(b) - float(a))
+                        except ValueError:
+                            continue
+                        seg_p = self.buf / name
+                        self.segments.append((seg_p, self.seg_clock, self.seg_clock + dur))
+                        seen_names.add(name)
+                        self.seg_clock += dur
+                    self.csv_seen[i] = len(rows)
+            if self.ended:
+                for i in range(1, self.part + 1):
+                    for seg_p in sorted(self.buf.glob(f"p{i:02d}_*.ts")):
+                        if seg_p.name in seen_names:
+                            continue
+                        try:
+                            if seg_p.stat().st_size <= 16384:
+                                continue
+                            dur = 0.0
+                            try:
+                                dur = float(media.probe(seg_p).get("duration") or 0.0)
+                            except Exception:  # noqa: BLE001
+                                dur = 0.0
+                            if dur <= 0.1:
+                                dur = max(2.0, min(float(SEG_SEC), self.samples / SR - self.seg_clock))
+                            self.segments.append((seg_p, self.seg_clock, self.seg_clock + dur))
+                            seen_names.add(seg_p.name)
+                            self.seg_clock += dur
+                        except OSError:
+                            pass
             keep_from = self.seg_clock - self.settings["buffer_min"] * 60
             pinned = self._pinned_ranges()
             if pinned:
@@ -323,7 +368,7 @@ class Session:
             url,
             self._on_chat_message,
             self.stop_flag,
-            lambda: self.samples / SR,
+            self.stream_clock,
         )
         self.chat_on = False
 
@@ -382,15 +427,19 @@ class Session:
         audio_snap = viral_engine.analyze_audio_window(db_copy, now_sec)
         transcript_snap = viral_engine.analyze_transcript_window(words_copy, now_sec)
         chat_conn = bool(self.chat_on or self.chat_total > 0 or (self.adapter and self.adapter.status == "connected"))
+        warming = n < 12 and chat_snap["total_messages"] < 3
+        prev_trig = self.viral_engine.last_triggered_sec
         moment = self.viral_engine.evaluate(
             now_sec, chat_snap, audio_snap, transcript_snap, chat_connected=chat_conn
         )
+        if warming:
+            self.viral_engine.last_triggered_sec = prev_trig
 
         with self.lock:
             self.chat_metrics = chat_snap
             self.audio_metrics = audio_snap
             self.current_viral = moment
-            if n < 20 and chat_snap["total_messages"] < 3:
+            if warming:
                 self.base = {"warming": True, "viral_score": moment["viral_score"]}
                 return
             self.base = {
@@ -463,7 +512,48 @@ class Session:
                 "score": target.get("score", 80),
                 "why": f"Approved viral moment ({target.get('score', 80)} pts): {target.get('why', '')}",
             })
+        self._publish()
         return target
+
+    def _fallback_live_clip(self, ws, now, viral_meta=None, why=None):
+        st = self.settings
+        min_len = float(st.get("min_len", 15))
+        max_len = float(st.get("max_len", 60))
+        dur = max(0.0, now - ws)
+        if dur < 5.0:
+            return None
+        target_len = min(max_len, max(min_len, 35.0))
+        if dur <= max_len:
+            s, e = ws, now
+        else:
+            with self.lock:
+                db_copy = list(self.db)
+                chat_copy = dict(self.chat)
+            z = brain.loud_zscore(np.array(db_copy, dtype=np.float32)) if len(db_copy) >= 5 else np.zeros(max(1, int(now) + 1))
+            best_t, best_v = (ws + now) / 2.0, -1e9
+            for t in range(int(ws), int(now) + 1):
+                lz = float(z[t]) if 0 <= t < len(z) else 0.0
+                ch = float(chat_copy.get(t, 0))
+                val = lz + 1.5 * ch
+                if val > best_v:
+                    best_v = val
+                    best_t = float(t)
+            s = max(ws, min(now - target_len, best_t - target_len * 0.6))
+            e = min(now, s + target_len)
+        s, e = round(s, 2), round(e, 2)
+        if e - s < 4.0:
+            return None
+        if self.job["clips"] and any(brain._overlaps(s, e, [k]) for k in self.job["clips"]):
+            return None
+        with self.lock:
+            win_words = [w for w in self.words if s <= w["s"] <= e]
+        text = " ".join(w["w"] for w in win_words) or (self.job.get("title") or "Insane live stream reaction moment")
+        score = int((viral_meta or {}).get("score") or max(68, int(st.get("min_score", 65))))
+        c = brain._smart_describe(text, self.job.get("title", ""), self.job.get("uploader", ""),
+                                  s=s, e=e, score=score)
+        c["reason"] = (viral_meta or {}).get("why") or why or "Live stream audio & chat highlight"
+        self._add_clip(c)
+        return c
 
     def _ai_check(self, window=None, why=None, viral_meta=None):
         """Judge 1 reads only the words. If it finds a moment, judge 2 reads only the loudness and chat activity
@@ -477,26 +567,41 @@ class Session:
             now = self.t_done
             ws = max(0.0, now - max(every, 3) * 60 - 90)  # each check overlaps the last by 90 s, so nothing falls between
         self.last_check = self.t_done
+        self._initial_check_done = True
         win = [w for w in self.words if ws <= w["s"] <= now]
         recent = [c for c in self.job["clips"] if c.get("score", 0) > 0 and time.time() - c.get("made_at", 0) < 3600]
         last_clip = max((c.get("made_at", 0) for c in self.job["clips"]), default=self.started_at)
         must = st["must_clip_min"] > 0 and time.time() - last_clip >= st["must_clip_min"] * 60
         verdict = {"t": round(now), "transcript": None, "reaction": None, "trigger": why}
 
-        # If a confirmed viral moment triggered this check and speech is sparse (e.g. pure reaction/screaming/laughing + chat explosion),
-        # still create the clip using the exact pre-roll/post-roll window!
-        if len(win) < 8 and viral_meta and viral_meta.get("score", 0) >= st.get("min_score", 65):
-            text = " ".join(w["w"] for w in win) or (self.job.get("title") or "Insane live stream reaction moment")
-            c = brain._smart_describe(text, self.job.get("title", ""), self.job.get("uploader", ""),
-                                      s=ws, e=now, score=int(viral_meta["score"]))
-            c["reason"] = viral_meta.get("why") or "Viral chat & audio reaction burst"
-            self._add_clip(c)
-            self._verdict(verdict, "Clipped: " + c["reason"][:60])
-            return
+        with self.lock:
+            db_copy = list(self.db)
+            chat_cnt = sum(self.chat.get(t, 0) for t in range(int(ws), int(now) + 1))
+            total_chat = self.chat_total
+        audio_snap = (
+            viral_engine.analyze_audio_window(db_copy[max(0, int(ws)):max(0, int(now) + 1)], now)
+            if len(db_copy) >= 5 else {"audio_score": 0.0, "peak_db": -60.0}
+        )
 
+        # If speech is sparse (e.g. non-English stream, pure reaction, or initial/high-activity check),
+        # create a clip directly using audio/chat activity around the peak moment.
         if len(win) < 8:
+            if (
+                (viral_meta and viral_meta.get("score", 0) >= st.get("min_score", 65))
+                or must
+                or audio_snap.get("audio_score", 0) >= 45
+                or audio_snap.get("peak_db", -60) > -28
+                or chat_cnt >= 3
+                or (total_chat > 0 and now - ws >= st.get("min_len", 15))
+                or (len(self.job["clips"]) == 0 and now - ws >= st.get("min_len", 15))
+            ):
+                c = self._fallback_live_clip(ws, now, viral_meta=viral_meta, why=why)
+                if c:
+                    self._verdict(verdict, "Clipped: " + c["reason"][:60])
+                    return
             self.skipped += 1
             return self._verdict(verdict, "Skipped: nobody talking")
+
         if len(recent) >= st["live_per_hour"] and not must:
             self.skipped += 1
             return self._verdict(verdict, f"Skipped: {st['live_per_hour']} clips this hour already")
@@ -507,6 +612,11 @@ class Session:
                                                 n=1 if every <= 2 else 2, must=must or bool(viral_meta))
         except Exception as e:  # noqa: BLE001
             self.job["ai"]["last_error"] = str(e)[-200:]
+            if viral_meta or must or (len(self.job["clips"]) == 0 and now >= 30):
+                c = self._fallback_live_clip(ws, now, viral_meta=viral_meta, why=why)
+                if c:
+                    self._verdict(verdict, "Clipped: " + c["reason"][:60])
+                    return
             return self._verdict(verdict, "AI error: " + str(e)[-80:])
         self.checks += 1
         self.tokens += tok
@@ -516,6 +626,11 @@ class Session:
         keep = [c for c in cands if c["score"] >= (40 if must else st["min_score"])]
         verdict["transcript"] = max((c["score"] for c in cands), default=0)
         if not keep:
+            if viral_meta or must or (len(self.job["clips"]) == 0 and now >= 30):
+                c = self._fallback_live_clip(ws, now, viral_meta=viral_meta, why=why)
+                if c:
+                    self._verdict(verdict, "Clipped: " + c["reason"][:60])
+                    return
             return self._verdict(verdict, "Words judge: nothing clip-worthy")
         z = brain.loud_zscore(np.array(self.db, dtype=np.float32))
         lo, hi = int(ws), int(now) + 1
@@ -554,6 +669,10 @@ class Session:
             must = False
             if added >= (1 if every <= 2 else 2):
                 break
+        if added == 0 and (viral_meta or must or (len(self.job["clips"]) == 0 and now >= 30)):
+            c = self._fallback_live_clip(ws, now, viral_meta=viral_meta, why=why)
+            if c:
+                self._verdict(verdict, "Clipped: " + c["reason"][:60])
 
     def _verdict(self, v, result):
         self.verdicts.append(dict(v, result=result))
@@ -613,46 +732,73 @@ class Session:
 
     def _render(self, clip):
         """Runs on the render worker: copy the needed buffer pieces, then make the clip."""
-        deadline = time.time() + 45
-        while time.time() < deadline:
-            self._scan_segments()
-            if self.ended or (self.segments and self.segments[-1][2] >= clip["end"] + 1):
-                break
-            time.sleep(1)
-        with self.lock:
-            segs = [s for s in self.segments if s[2] > clip["start"] - PAD and s[1] < clip["end"] + PAD and s[0].exists()]
-        if not segs or segs[0][1] > clip["start"] + 2:
-            clip.update(status="error", error="That part of the stream is no longer in the buffer.")
-            jobs.save(self.job)
-            return
-        if "width" not in self.job:
-            meta = media.probe(segs[0][0])
-            self.job.update(width=meta["width"], height=meta["height"])
-        lst = self.dir / "clips" / f"{clip['id']}.txt"
-        lst.write_text("".join(f"file '{s[0].as_posix()}'\n" for s in segs), encoding="utf-8")
-        src = self.dir / "clips" / f"{clip['id']}.src.ts"
         try:
-            media.run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(lst),
-                       "-c", "copy", str(src)])
+            deadline = time.time() + 45
+            while time.time() < deadline:
+                self._scan_segments()
+                if self.ended or (self.segments and self.segments[-1][2] >= clip["end"] + 1):
+                    break
+                time.sleep(1)
+            with self.lock:
+                segs = [s for s in self.segments if s[2] > clip["start"] - PAD and s[1] < clip["end"] + PAD and s[0].exists()]
+            overlap = (min(clip["end"], segs[-1][2]) - max(clip["start"], segs[0][1])) if segs else 0.0
+            if not segs or segs[0][1] > clip["start"] + 15 or overlap < min(4.0, (clip["end"] - clip["start"]) * 0.4):
+                clip.update(status="error", error="That part of the stream is no longer in the buffer.")
+                jobs.save(self.job)
+                return
+            if "width" not in self.job:
+                meta = media.probe(segs[0][0])
+                self.job.update(width=meta["width"], height=meta["height"])
+            lst = self.dir / "clips" / f"{clip['id']}.txt"
+            lst.write_text("".join(f"file '{s[0].as_posix()}'\n" for s in segs), encoding="utf-8")
+            src = self.dir / "clips" / f"{clip['id']}.src.ts"
+            try:
+                media.run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(lst),
+                           "-c", "copy", str(src)])
+            except Exception as e:  # noqa: BLE001
+                clip.update(status="error", error=media_safe(e))
+                jobs.save(self.job)
+                return
+            finally:
+                lst.unlink(missing_ok=True)
+            dur = segs[-1][2] - segs[0][1]
+            offset, heard = self._align(src, segs[0][1] + self.clock_fix, dur)
+            self.clock_fix = offset - segs[0][1]  # the two clocks drift ~4 s an hour; start the next clip from here
+            clip.update(src=str(src), src_offset=round(offset, 2), src_end=round(offset + dur, 2))
+            clip["start"] = max(clip["start"], clip["src_offset"])
+            clip["end"] = min(clip["end"], clip["src_end"])
+            if clip["end"] - clip["start"] < 2.0:
+                clip["start"] = clip["src_offset"]
+                clip["end"] = clip["src_end"]
+            shifted_heard = [dict(w, s=round(w["s"] + offset, 2), e=round(w["e"] + offset, 2)) for w in heard]
+            with self.lock:
+                live_words = list(self.words)
+            live_in_clip = [w for w in live_words if clip["start"] <= w["s"] <= clip["end"]]
+            heard_in_clip = [w for w in shifted_heard if clip["start"] <= w["s"] <= clip["end"]]
+            render_words = shifted_heard if len(heard_in_clip) > len(live_in_clip) else live_words
+            if len(live_in_clip) < 4 and len(heard_in_clip) >= 4:
+                rich = brain._smart_describe(
+                    " ".join(w["w"] for w in heard_in_clip),
+                    self.job.get("title", ""),
+                    self.job.get("uploader", ""),
+                    s=clip["start"],
+                    e=clip["end"],
+                    score=clip.get("score", 75),
+                )
+                for fk in ("hook", "title", "description", "hashtags", "highlight_words"):
+                    if rich.get(fk):
+                        clip[fk] = rich[fk]
+            jobs.render_one(self.job, clip, render_words)
         except Exception as e:  # noqa: BLE001
             clip.update(status="error", error=media_safe(e))
             jobs.save(self.job)
-            return
-        finally:
-            lst.unlink(missing_ok=True)
-        dur = segs[-1][2] - segs[0][1]
-        offset = self._align(src, segs[0][1] + self.clock_fix, dur)
-        self.clock_fix = offset - segs[0][1]  # the two clocks drift ~4 s an hour; start the next clip from here
-        clip.update(src=str(src), src_offset=round(offset, 2), src_end=round(offset + dur, 2))
-        clip["start"] = max(clip["start"], clip["src_offset"])
-        clip["end"] = min(clip["end"], clip["src_end"])
-        jobs.render_one(self.job, clip, list(self.words))
 
     def _align(self, src, guess, dur):
         """Where `src` really starts on the transcript clock. The video pieces and the audio feed keep separate
         clocks that drift apart, so transcribe the clip's own audio and line its words up with the live words.
         Local speech model only: no AI calls."""
         key = lambda w: re.sub(r"[^a-z0-9]", "", w.lower())
+        heard = []
         try:
             wav = src.with_suffix(".wav")
             media.extract_audio(src, wav)
@@ -669,16 +815,17 @@ class Session:
                 if m:
                     diffs.append(min(m, key=lambda s: abs(s - (guess + h["s"]))) - h["s"])
             if len(diffs) >= 4:
-                return float(np.median(diffs))
+                return float(np.median(diffs)), heard
         except Exception:  # noqa: BLE001 - fall back to the piece clock
             pass
-        return guess
+        return guess, heard
 
     def clip_last(self, seconds):
         end = self.samples / SR
         if end < 5:
             raise ValueError("Nothing has been recorded yet.")
         self.manual.append({"start": max(0.0, end - seconds), "end": end, "score": 85, "why": "Clipped manually from Live Monitor"})
+        self._publish()
 
     def _publish(self):
         elapsed = self.samples / SR
@@ -767,6 +914,8 @@ class Session:
                     s_win = sp.get("start", sp["t"] - float(self.settings.get("pre_roll_sec", self.AUTO_BEFORE)))
                     e_win = sp.get("end", sp["t"] + float(self.settings.get("post_roll_sec", self.AUTO_AFTER)))
                     self._ai_check((s_win, e_win), "Viral: " + sp["why"], viral_meta=sp)
+                elif not self._initial_check_done and len(self.job["clips"]) == 0 and cur_sec >= max(30.0, float(self.settings.get("min_len", 15)) + 15.0) and self.segments:
+                    self._ai_check((0.0, cur_sec), "Initial stream check")
                 elif self.t_done - self.last_check >= every * 60 or (self.ended and not busy and self.t_done > self.last_check):
                     self._ai_check()
                 self._publish()
@@ -776,7 +925,26 @@ class Session:
                 break
             if not busy:
                 time.sleep(2)
-        failed = bool(self.job.get("error")) and not started
+        self.stop_flag.set()
+        if self.adapter is not None:
+            self.adapter.disconnect()
+        self._scan_segments()
+        if (
+            not self.job.get("error")
+            and len(self.job["clips"]) == 0
+            and not self.manual
+            and self.segments
+            and (self.segments[-1][2] - self.segments[0][1]) >= max(8.0, float(self.settings.get("min_len", 15)) * 0.6)
+        ):
+            try:
+                self._ai_check(
+                    window=(self.segments[0][1], self.segments[-1][2]),
+                    why="Stream highlight",
+                    viral_meta={"score": max(72, int(self.settings.get("min_score", 65))), "why": "Best moment from recorded stream"},
+                )
+            except Exception as e:  # noqa: BLE001
+                self.job["ai"]["last_error"] = str(e)[-200:]
+        failed = bool(self.job.get("error")) and self.samples < SR * 5
         self.job.update(status="error" if failed else "done", stage="Could not record" if failed else self.end_note)
         jobs.save(self.job)
         creators.log(cid, f"Recording finished ({self.end_note.lower()}): {len(self.job['clips'])} clips, "
@@ -859,13 +1027,16 @@ def start_session(creator: dict, url=None) -> dict:
                       creator=creator["id"], kind="live")
     job.update(status="live", stage="Connecting to the stream")
     jobs.save(job)
-    Session(job, creator).start()
+    sess = Session(job, creator)
+    sess._publish()
+    sess.start()
     return job
 
 
 def start_monitor_url(url: str, options: dict = None) -> dict:
     """Start autonomous live monitoring directly from any Twitch, Kick, or YouTube Live URL.
     Finds an existing creator workspace for that channel or creates one automatically."""
+    from . import profiles
     val = platforms.validate_live_url(url)
     norm_url = val["url"]
     ch_name = val["channel"].lstrip("@").split("/")[-1] or val["platform"]
@@ -877,6 +1048,7 @@ def start_monitor_url(url: str, options: dict = None) -> dict:
     if existing:
         if options:
             existing = creators.update(existing["id"], options)
+        profiles.refresh(existing["id"])
         s = active_for(existing["id"])
         if s:
             if options:
@@ -885,6 +1057,7 @@ def start_monitor_url(url: str, options: dict = None) -> dict:
         return start_session(existing, norm_url)
     creator_data = {"name": ch_name, "channel": norm_url, **(options or {})}
     created = creators.create(creator_data)
+    profiles.refresh(created["id"], force=True)
     return start_session(created, norm_url)
 
 

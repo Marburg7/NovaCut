@@ -20,10 +20,17 @@ import threading
 import time
 
 os.environ["PEAKCUT_DATA"] = tempfile.mkdtemp(prefix="pc-autolive-")
-os.environ["DATABASE_URL"] = ""
+os.environ.update(
+    DATABASE_URL="",
+    PEAKCUT_ACCOUNTS="0",
+    PEAKCUT_PUBLIC_URL="http://127.0.0.1:8765",
+    PEAKCUT_FETCH_MODEL="0",
+    PEAKCUT_UPDATE_CHECK="0",
+)
 sys.path.insert(0, ".")
 
-from studio import ai, auth, brain, chat_intel, config, creators, ctx, db, jobs, live, load, platforms, viral_engine  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+from studio import ai, auth, brain, chat_intel, config, creators, ctx, db, jobs, live, load, platforms, profiles, server, viral_engine  # noqa: E402
 from studio.platforms.base import ChatMessage, check_ssrf_safe, sanitize_chat_text  # noqa: E402
 from studio.platforms.kick import KickAdapter  # noqa: E402
 from studio.platforms.twitch import TwitchAdapter  # noqa: E402
@@ -468,6 +475,45 @@ finally:
     ai.httpx.post = orig_post
     os.environ.pop("PEAKCUT_AI_KEY", None)
     config._kept.clear()
+
+
+# ==============================================================================
+# 7. LIVE MONITOR HTTP API ENDPOINTS (validate, monitor, config, stop)
+# ==============================================================================
+BASE_URL = "http://127.0.0.1:8765"
+ORIGIN_HDR = {"Origin": BASE_URL}
+client = TestClient(server.app, base_url=BASE_URL, follow_redirects=False)
+
+orig_start = live.Session.start
+orig_refresh = profiles.refresh
+try:
+    live.Session.start = lambda self: live.SESSIONS.__setitem__(self.job["id"], self)
+    profiles.refresh = lambda *args, **kwargs: None
+
+    val_r = client.get("/api/live/validate", params={"url": "https://www.twitch.tv/testliveuser"})
+    check("GET /api/live/validate accepts Twitch URL", (
+        val_r.status_code == 200 and val_r.json().get("platform") == "twitch" and val_r.json().get("channel") == "testliveuser"
+    ), f"status={val_r.status_code} body={val_r.text}")
+
+    mon_r = client.post("/api/live/monitor", json={"url": "https://www.twitch.tv/testliveuser", "options": {"min_score": 60}}, headers=ORIGIN_HDR)
+    check("POST /api/live/monitor starts live monitoring session", (
+        mon_r.status_code == 200 and mon_r.json().get("status") == "live" and bool(mon_r.json().get("live"))
+    ), f"status={mon_r.status_code} body={mon_r.text}")
+
+    mon_jid = mon_r.json().get("id")
+    cfg_r = client.put(f"/api/live/{mon_jid}/config", json={"min_score": 70, "sensitivity": "high"}, headers=ORIGIN_HDR)
+    check("PUT /api/live/{jid}/config updates viral threshold", (
+        cfg_r.status_code == 200 and cfg_r.json().get("ok") and (cfg_r.json().get("live") or {}).get("threshold") == 70.0
+    ), f"status={cfg_r.status_code} body={cfg_r.text}")
+
+    stop_r = client.post(f"/api/live/{mon_jid}/stop", headers=ORIGIN_HDR)
+    check("POST /api/live/{jid}/stop stops monitoring session", (
+        stop_r.status_code == 200 and stop_r.json().get("ok")
+    ), f"status={stop_r.status_code} body={stop_r.text}")
+finally:
+    live.Session.start = orig_start
+    profiles.refresh = orig_refresh
+    live.SESSIONS.clear()
 
 print("ALL PASSED" if not fails else f"{len(fails)} failed: {fails}")
 db.engine.dispose()

@@ -490,6 +490,10 @@ def describe(text, title="", uploader=""):
     blank = {"score": 0, "category": "other", "hook": "", "title": "", "description": "", "hashtags": [],
              "highlight_words": [], "reason": "Clipped by hand."}
     if len(text.split()) < 4:
+        if text.strip() or title.strip():
+            res = _smart_describe(text or title or "Live stream highlight", title=title, uploader=uploader, score=80)
+            res["reason"] = "Clipped by hand."
+            return res
         return blank
     prompt = (f"A streamer's viewer clipped this moment by hand.\nVideo title: {title or 'unknown'}\n"
               f"Channel: {uploader or 'unknown'}\n\nReturn exactly one item describing it. Set start and end to 0."
@@ -545,7 +549,7 @@ SIG_SCHEMA = {
 def judge_transcript(words, start, now, title="", uploader="", min_len=15, max_len=60, existing=(), n=2, must=False):
     """Judge 1: words only. Returns (clips, tokens)."""
     lines = make_lines(words)
-    if len(lines) < 3:
+    if not lines or (len(lines) < 2 and len(words) < 4):
         return [], 0
     prompt = (TRANSCRIPT_JUDGE.format(title=_safe(title) or "unknown", uploader=_safe(uploader) or "unknown", start=start, now=now,
                                       n=n, must=MUST_PICK if must else NOT_MUST)

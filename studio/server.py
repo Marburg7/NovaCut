@@ -1200,6 +1200,7 @@ def edit_creator(cid: str, body: dict = Body(...)):
 @app.post("/api/creators/{cid}/live")
 def go_live(cid: str, body: dict = Body(default={})):
     _need_verified()
+    _quota()
     try:
         c = creators.get(cid)
     except ValueError:
@@ -1228,7 +1229,7 @@ def validate_live(url: str = ""):
 @app.post("/api/live/monitor")
 def start_live_monitor(body: dict = Body(...)):
     _need_verified()
-    _disk_ok()
+    _quota()
     url = str(body.get("url") or "").strip()
     opts = body.get("options") if isinstance(body.get("options"), dict) else {}
     try:

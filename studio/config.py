@@ -51,6 +51,74 @@ CA_BUNDLE = env("PEAKCUT_CA_BUNDLE", "").strip()
 TLS_SOURCE = "off"
 
 
+def _export_ca_bundle() -> str | None:
+    """Export combined OS and Python CA certificates into a PEM file so native subprocesses (ffmpeg, ffprobe)
+    also trust system and corporate certificates."""
+    import subprocess
+    import sys
+    import tempfile
+
+    parts = []
+    if sys.platform == "darwin":
+        try:
+            r = subprocess.run(
+                ["security", "find-certificate", "-a", "-p",
+                 "/System/Library/Keychains/SystemRootCertificates.keychain",
+                 "/Library/Keychains/System.keychain"],
+                capture_output=True, text=True, timeout=6,
+            )
+            if r.returncode == 0 and "-----BEGIN CERTIFICATE-----" in r.stdout:
+                parts.append(r.stdout)
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        ctx_ca = ssl.create_default_context()
+        ders = ctx_ca.get_ca_certs(binary_form=True)
+        if ders:
+            parts.append("\n".join(ssl.DER_cert_to_PEM_cert(d) for d in ders))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import certifi
+        cf = Path(certifi.where())
+        if cf.is_file():
+            parts.append(cf.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:  # noqa: BLE001
+        pass
+    etc_ca = Path("/etc/ssl/cert.pem")
+    if etc_ca.is_file():
+        try:
+            parts.append(etc_ca.read_text(encoding="utf-8", errors="ignore"))
+        except Exception:  # noqa: BLE001
+            pass
+    existing_ca = os.environ.get("SSL_CERT_FILE", "").strip()
+    if existing_ca and Path(existing_ca).is_file():
+        try:
+            parts.append(Path(existing_ca).read_text(encoding="utf-8", errors="ignore"))
+        except Exception:  # noqa: BLE001
+            pass
+    seen_pems = set()
+    unique_pems = []
+    for p in parts:
+        for blk in re.findall(r"-----BEGIN CERTIFICATE-----\s*[\s\S]*?\s*-----END CERTIFICATE-----", p or ""):
+            norm = blk.strip()
+            if norm not in seen_pems:
+                seen_pems.add(norm)
+                unique_pems.append(norm)
+    if not unique_pems:
+        return None
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    bundle = Path(tempfile.gettempdir()) / f"novacut-ca-{uid}.pem"
+    try:
+        bundle.write_text("\n".join(unique_pems) + "\n", encoding="utf-8")
+        os.environ["SSL_CERT_FILE"] = str(bundle)
+        os.environ["REQUESTS_CA_BUNDLE"] = str(bundle)
+        os.environ["CURL_CA_BUNDLE"] = str(bundle)
+        return str(bundle)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _setup_tls() -> str:
     if INSECURE_TLS:
         print("\n  WARNING: PEAKCUT_INSECURE_TLS=1, so secure connections are NOT being checked.\n", flush=True)
@@ -60,6 +128,7 @@ def _setup_tls() -> str:
             raise SystemExit(f"\n  PEAKCUT_CA_BUNDLE points at {CA_BUNDLE}, and there is no file there.\n")
         os.environ["SSL_CERT_FILE"] = CA_BUNDLE
         return "custom bundle"
+    _export_ca_bundle()
     try:
         import truststore
         truststore.inject_into_ssl()

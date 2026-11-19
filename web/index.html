@@ -1360,11 +1360,11 @@ function jobOptions() {
    shows up under another. Links move out of the box into the list as soon as they are recognised. */
 const DRAFTS = {};
 const draftKey = () => creatorId() ? "c:" + creatorId() : S.view;
-const att = () => DRAFTS[draftKey()] ||= {files: [], links: [], note: null, busy: false, queued: false};
+const att = () => DRAFTS[draftKey()] ||= {files: [], links: [], note: null, liveUrl: null, busy: false, queued: false};
 const VIDEO_EXT = /\.(mp4|mov|mkv|webm|m4v|ts|flv)$/i;
 const fmtLen = s => { s = Math.round(s || 0); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = String(s % 60).padStart(2, "0"); return h ? `${h}:${String(m).padStart(2, "0")}:${x}` : `${m}:${x}`; };
 const fmtSize = b => b >= 1e9 ? (b / 1e9).toFixed(1) + " GB" : Math.max(1, Math.round(b / 1e6)) + " MB";
-const isChannel = u => /^(https?:\/\/)?(www\.)?(twitch\.tv|kick\.com)\/[A-Za-z0-9_]+\/?$/.test(u) || /youtube\.com\/(@[^/]+|channel\/[^/]+)\/?(live|videos|streams)?\/?$/.test(u);
+const isChannel = u => /^(https?:\/\/)?(www\.)?(twitch\.tv|kick\.com)\/[A-Za-z0-9_-]+\/?([?#].*)?$/.test(u) || /youtube\.com\/(@[^/?#]+|channel\/[^/?#]+)\/?(live|videos|streams)?\/?([?#].*)?$/.test(u);
 const looksLink = u => /^https?:\/\/([\w-]+\.)*(youtube\.com|youtu\.be|twitch\.tv|kick\.com)\//i.test(u);
 const fullLink = u => /[?&]v=[\w-]{11}\b|youtu\.be\/[\w-]{11}\b|\/(shorts|live|embed)\/[\w-]{11}\b|twitch\.tv\/videos\/\d{6,}|clips\.twitch\.tv\/\w|twitch\.tv\/\w+\/clip\/\w|kick\.com\/[\w-]+\/(videos?|clips?)\/[\w-]{6,}/i.test(u);
 const batchMax = () => S.status.max_batch || 5;
@@ -1384,7 +1384,7 @@ function attach(list) {
   if (full) toast(`You can send up to ${batchMax()} videos at a time. Start these, then add more.`, "bad");
   drawAtt();
 }
-function canGo(A = att()) { return !A.busy && (A.files.length > 0 || A.links.some(l => l.state === "ok")); }
+function canGo(A = att()) { return !A.busy && (A.files.length > 0 || !!A.liveUrl || A.links.some(l => l.state === "ok")); }
 
 /* one row style for everything: picture on the left, name and details, state on the right */
 function rowHtml(A, {id, kind, thumb, len, title, sub, side, bar}) {
@@ -1397,6 +1397,15 @@ function drawAtt() {
   const box = $("#attIn"); if (!box) return;
   const A = att();
   let h = A.note ? `<div class="lp bad">${ic("warn")}<span>${esc(A.note)}</span></div>` : "";
+  if (A.liveUrl) {
+    const dp = detectUrlPlat(A.liveUrl);
+    h += `<div class="lp" style="border-color:var(--brand);background:rgba(99,102,241,0.08)">
+      <div class="th" style="display:grid;place-items:center">${dp && PLAT[dp] ? platLogo(dp) : ic("radio")}</div>
+      <div class="tx"><b title="${esc(A.liveUrl)}">${esc(A.liveUrl)}</b><span>Live stream channel detected — connect to record &amp; auto-clip</span></div>
+      <button type="button" class="btn sm primary" data-act="quicklive" data-url="${esc(A.liveUrl)}">${ic("bolt")}Connect &amp; Monitor Live Stream</button>
+      ${A.busy ? "" : `<button type="button" class="rm" data-act="clearlive" aria-label="Remove live link">${ic("x")}</button>`}
+    </div>`;
+  }
   h += A.links.map(l => {
     if (l.state === "wait") return `<div class="lp wait" data-row="${l.id}"><div class="th"></div><div class="tx"><span class="sk" style="width:62%"></span><span class="sk" style="width:34%"></span></div>
       ${A.busy ? "" : `<button type="button" class="rm" data-rm="link" data-id="${l.id}" aria-label="Remove link">${ic("x")}</button>`}</div>`;
@@ -1421,11 +1430,12 @@ function drawAtt() {
     if (f && !f.dur) { f.dur = v.duration; const th = v.parentElement; if (!th.querySelector(".du")) th.insertAdjacentHTML("beforeend", `<span class="du">${fmtLen(f.dur)}</span>`); }
   }, {once: true}));
   $("#att")?.classList.toggle("has", !!h);
-  const u = $("#url"); if (u) u.placeholder = A.links.length || A.files.length ? "Paste another link" : "Paste a YouTube, Twitch or Kick video link";
+  const u = $("#url"); if (u) u.placeholder = A.links.length || A.files.length ? "Paste another link" : "Paste a YouTube, Twitch or Kick video or live link";
   const b = $("#goBtn");
   if (b) { b.disabled = A.busy;
     const k = A.files.length + A.links.filter(l => l.state === "ok").length;
-    b.innerHTML = A.busy ? `${ic("up")}Sending…` : A.queued ? `${ic("clock")}Finding video…` : `${ic("scissors")}Make clips${k > 1 ? ` (${k})` : ""}`; }
+    b.innerHTML = A.busy ? `${ic("up")}Sending…` : A.queued ? `${ic("clock")}Finding video…`
+      : (A.liveUrl && !k) ? `${ic("bolt")}Monitor Live Stream` : `${ic("scissors")}Make clips${k > 1 ? ` (${k})` : ""}`; }
 }
 
 async function lookUp(u) {
@@ -1458,8 +1468,9 @@ let linkTimer = 0;
 function onLink(input) {
   clearTimeout(linkTimer);
   const A = att(), u = input.value.trim();
-  if (!u) { A.note = null; return drawAtt(); }
-  if (isChannel(u)) { A.note = "That's a channel, not a video. To clip their live streams, add them as a creator and press Start recording."; return drawAtt(); }
+  if (!u) { A.note = null; A.liveUrl = null; return drawAtt(); }
+  if (isChannel(u)) { A.note = null; A.liveUrl = /^https?:\/\//i.test(u) ? u : "https://" + u; return drawAtt(); }
+  A.liveUrl = null;
   if (!looksLink(u)) { A.note = u.length > 10 ? "Paste a full YouTube, Twitch or Kick video link." : null; return drawAtt(); }
   A.note = null; drawAtt();
   if (fullLink(u)) return takeLink(A, u, input);
@@ -1467,7 +1478,13 @@ function onLink(input) {
 }
 document.addEventListener("input", e => { if (e.target.id === "url") onLink(e.target);
   if (e.target.closest?.("#cform") && e.target.dataset.k && !/checkbox|radio/.test(e.target.type)) dirty(true); });
-document.addEventListener("keydown", e => { if (e.target.id === "url" && e.key === "Enter" && e.target.value.trim() && looksLink(e.target.value.trim())) { e.preventDefault(); clearTimeout(linkTimer); takeLink(att(), e.target.value.trim(), e.target); } });
+document.addEventListener("keydown", e => {
+  if (e.target.id === "url" && e.key === "Enter") {
+    const val = e.target.value.trim();
+    if (val && isChannel(val)) { e.preventDefault(); clearTimeout(linkTimer); makeClips(); return; }
+    if (val && looksLink(val)) { e.preventDefault(); clearTimeout(linkTimer); takeLink(att(), val, e.target); }
+  }
+});
 document.addEventListener("click", e => {
   const r = e.target.closest("[data-rm]"), A = att(); if (!r || A.busy) return;
   if (r.dataset.rm === "link") A.links = A.links.filter(l => l.id !== r.dataset.id);
@@ -1534,11 +1551,22 @@ function sendFile(f, who) {
     x.send(fd);
   });
 }
+async function startLiveMonitor(url) {
+  const j = await send("/api/live/monitor", {url, options: S.monCfg || {}});
+  S.monUrl = url;
+  if (j?.id && !jobOf(j.id)) S.jobs.unshift(j);
+  return j;
+}
 async function makeClips() {
   const A = att();
   if (A.busy) return;
   const typed = $("#url")?.value.trim();
-  if (typed && looksLink(typed) && !isChannel(typed)) { clearTimeout(linkTimer); takeLink(A, typed, $("#url")); }
+  if (typed && isChannel(typed)) {
+    A.liveUrl = /^https?:\/\//i.test(typed) ? typed : "https://" + typed;
+    if ($("#url")) $("#url").value = "";
+  } else if (typed && looksLink(typed) && !isChannel(typed)) {
+    clearTimeout(linkTimer); takeLink(A, typed, $("#url"));
+  }
   if (A.links.some(l => l.state === "wait")) {   // still looking a link up: start as soon as it is found
     A.queued = true; drawAtt();
     toast("Finding the video first. Clipping starts as soon as it's found.");
@@ -1550,11 +1578,22 @@ async function makeClips() {
     return;
   }
   A.busy = true; drawAtt();
-  let started = 0, failed = 0;
+  let started = 0, liveStarted = 0, failed = 0;
   const who = targetCreator(), opts = jobOptions();
+  if (A.liveUrl) {
+    try {
+      await startLiveMonitor(A.liveUrl);
+      A.liveUrl = null;
+      if ($("#url")) $("#url").value = "";
+      started++; liveStarted++;
+    } catch (e) { A.note = e.message; failed++; }
+  }
   for (const l of A.links.filter(x => x.state === "ok")) {
     l.sending = true; drawAtt();
-    try { await send("/api/jobs", {url: l.url, options: opts, creator: who}); l.state = "done"; started++; }
+    try {
+      if (l.info?.is_live) { await startLiveMonitor(l.url); l.state = "done"; started++; liveStarted++; }
+      else { await send("/api/jobs", {url: l.url, options: opts, creator: who}); l.state = "done"; started++; }
+    }
     catch (e) { l.state = "bad"; l.msg = e.message; failed++; }
     l.sending = false; drawAtt();
   }
@@ -1568,9 +1607,10 @@ async function makeClips() {
   A.files = A.files.filter(f => { if (f.state === "done") { URL.revokeObjectURL(f.src); return false; } return true; });
   A.busy = false; drawAtt();
   if (started) {
-    toast(`${started === 1 ? "Your video is" : started + " videos are"} being clipped now.`, "ok");
-    if (!failed && S.view === "overview") go(who ? "c:" + who : "library"); else tick();
-  } else if (failed) toast("Nothing was started. The reason is shown on the video.", "bad");
+    toast(liveStarted ? "Connected to live stream & chat! Monitoring for viral moments." : `${started === 1 ? "Your video is" : started + " videos are"} being clipped now.`, "ok");
+    if (!failed && liveStarted) { go("monitor"); tick(); }
+    else if (!failed && S.view === "overview") go(who ? "c:" + who : "library"); else tick();
+  } else if (failed) toast(A.note || "Nothing was started. The reason is shown on the video.", "bad");
 }
 
 /* ============================================================ clips + jobs */
@@ -1654,7 +1694,7 @@ function liveHtml(j) {
       </div>`).join("")}
     </div>` : ""}
     <div class="meters">
-      <div class="meter"><h4>Audio Loudness (last 60s)</h4>${spark(L.level, "", -55, -8)}</div>
+      <div class="meter"><h4>Audio Loudness (last 60s)</h4>${spark(L.level && L.level.length ? L.level : [-55,-55,-55,-55,-55], "", -55, -8)}</div>
       <div class="meter"><h4>Chat Messages / Sec</h4>${spark(L.chat && L.chat.length ? L.chat : [0,0,0,0,0], "chat", 0, Math.max(4, ...(L.chat || [4])))}
         ${(CI.top_excitement?.length || CI.top_emotes?.length) ? `<div class="sub" style="margin-top:6px;font-size:12px">Top reactions: <b>${esc([...(CI.top_excitement || []), ...(CI.top_emotes || [])].slice(0, 6).join(", "))}</b></div>` : ""}
       </div>
@@ -1670,10 +1710,8 @@ function liveHtml(j) {
     </div>${j.error ? `<div class="err">${esc(j.error)}</div>` : ""}</div>
     ${j.clips.length ? `<div class="grid" style="margin-bottom:28px">${[...j.clips].reverse().map(c => clipHtml(j, c)).join("")}</div>` : ""}`;
 }
-function drawMonitor() {
+function drawMonitor(forceTop = false) {
   const box = $("#lmon"); if (!box) return;
-  if (box.contains(document.activeElement) && ["INPUT", "SELECT"].includes(document.activeElement.tagName)) return;
-  const liveJobs = S.jobs.filter(j => j.status === "live");
   const firstCreator = S.creators[0] || {};
   const curUrl = S.monUrl || firstCreator.channel || "";
   const detPlat = detectUrlPlat(curUrl);
@@ -1688,36 +1726,52 @@ function drawMonitor() {
     auto_clip: firstCreator.auto_clip ?? true,
     manual_approval: firstCreator.manual_approval ?? false,
   };
-  box.innerHTML = `<div class="card" style="margin-bottom:20px">
-      <div class="card-head"><div><h2>Autonomous Live Stream &amp; Chat Monitor</h2>
-        <p class="sub">Paste a Twitch, Kick or YouTube Live URL. NovaCut connects to the stream and live chat locally, detects viral spikes, preserves the ${cfg.pre_roll_sec}s pre-roll buffer, and auto-generates captioned 9:16 shorts with zero API costs.</p></div>
-        <span class="pill ok">${ic("check")}100% Local Engine</span></div>
-      <div class="row" style="gap:10px;margin-top:12px;flex-wrap:wrap">
-        <div class="composer-input" style="flex:1;min-width:260px;background:var(--bg);border:1px solid var(--line-2);border-radius:var(--r-sm);padding:4px 12px">
-          ${detPlat && PLAT[detPlat] ? platLogo(detPlat) : ic("link")}
-          <input id="lm_url" value="${esc(curUrl)}" placeholder="https://twitch.tv/streamer, https://kick.com/streamer, or https://youtube.com/@channel/live" autocomplete="off">
+  if (forceTop || !$("#lm_top", box)) {
+    box.innerHTML = `<div id="lm_top"></div><div id="lm_list"></div>`;
+    $("#lm_top", box).innerHTML = `<div class="card" style="margin-bottom:20px">
+        <div class="card-head"><div><h2>Autonomous Live Stream &amp; Chat Monitor</h2>
+          <p class="sub">Paste a Twitch, Kick or YouTube Live URL. NovaCut connects to the stream and live chat locally, detects viral spikes, preserves the ${cfg.pre_roll_sec}s pre-roll buffer, and auto-generates captioned 9:16 shorts with zero API costs.</p></div>
+          <span class="pill ok">${ic("check")}100% Local Engine</span></div>
+        <div class="row" style="gap:10px;margin-top:12px;flex-wrap:wrap">
+          <div class="composer-input" style="flex:1;min-width:260px;background:var(--bg);border:1px solid var(--line-2);border-radius:var(--r-sm);padding:4px 12px">
+            <span id="lm_plat_ic">${detPlat && PLAT[detPlat] ? platLogo(detPlat) : ic("link")}</span>
+            <input id="lm_url" value="${esc(curUrl)}" placeholder="https://twitch.tv/streamer, https://kick.com/streamer, or https://youtube.com/@channel/live" autocomplete="off">
+          </div>
+          <button class="btn primary" data-act="lmstart">${ic("bolt")}Connect &amp; Monitor</button>
+          <button class="btn" data-act="lmtogglecfg">${ic("sliders")}Detection Settings</button>
         </div>
-        <button class="btn primary" data-act="lmstart">${ic("bolt")}Connect &amp; Monitor</button>
-        <button class="btn" data-act="lmtogglecfg">${ic("sliders")}Detection Settings</button>
-      </div>
-      <div id="lm_cfg" style="display:${S.monCfgOpen ? "block" : "none"};margin-top:18px;padding-top:16px;border-top:1px solid var(--line)">
-        <div class="fields">
-          <label class="f">Detection Sensitivity<select id="lm_sens">${opts({low:"Low (Strict · 78+ score)", medium:"Medium (Balanced · 65+ score)", high:"High (Frequent · 52+ score)", custom:"Custom"}, cfg.sensitivity)}</select></label>
-          <label class="f">Minimum Viral Score (0–100)<input id="lm_min_score" type="number" min="10" max="99" value="${cfg.min_score}"></label>
-          <label class="f">Chat Spike Multiplier (x baseline)<input id="lm_spike_mult" type="number" step="0.2" min="1.2" max="20" value="${cfg.chat_spike_mult}"></label>
-          <label class="f">Minimum Unique Chatters<input id="lm_uniq" type="number" min="1" max="500" value="${cfg.min_unique_chatters}"></label>
-          <label class="f">Pre-Roll Buffer Preserved (seconds)<input id="lm_preroll" type="number" min="5" max="120" value="${cfg.pre_roll_sec}"></label>
-          <label class="f">Post-Roll Capture (seconds)<input id="lm_postroll" type="number" min="5" max="120" value="${cfg.post_roll_sec}"></label>
-          <label class="f">Cooldown Between Clips (seconds)<input id="lm_cooldown" type="number" min="5" max="600" value="${cfg.cooldown_sec}"></label>
-          <label class="f">Clipping Mode<select id="lm_mode">${opts({auto:"Automatic Clip Generation", manual:"Manual Approval Queue"}, cfg.manual_approval ? "manual" : "auto")}</select></label>
+        <div id="lm_cfg" style="display:${S.monCfgOpen ? "block" : "none"};margin-top:18px;padding-top:16px;border-top:1px solid var(--line)">
+          <div class="fields">
+            <label class="f">Detection Sensitivity<select id="lm_sens">${opts({low:"Low (Strict · 78+ score)", medium:"Medium (Balanced · 65+ score)", high:"High (Frequent · 52+ score)", custom:"Custom"}, cfg.sensitivity)}</select></label>
+            <label class="f">Minimum Viral Score (0–100)<input id="lm_min_score" type="number" min="10" max="99" value="${cfg.min_score}"></label>
+            <label class="f">Chat Spike Multiplier (x baseline)<input id="lm_spike_mult" type="number" step="0.2" min="1.2" max="20" value="${cfg.chat_spike_mult}"></label>
+            <label class="f">Minimum Unique Chatters<input id="lm_uniq" type="number" min="1" max="500" value="${cfg.min_unique_chatters}"></label>
+            <label class="f">Pre-Roll Buffer Preserved (seconds)<input id="lm_preroll" type="number" min="5" max="120" value="${cfg.pre_roll_sec}"></label>
+            <label class="f">Post-Roll Capture (seconds)<input id="lm_postroll" type="number" min="5" max="120" value="${cfg.post_roll_sec}"></label>
+            <label class="f">Cooldown Between Clips (seconds)<input id="lm_cooldown" type="number" min="5" max="600" value="${cfg.cooldown_sec}"></label>
+            <label class="f">Clipping Mode<select id="lm_mode">${opts({auto:"Automatic Clip Generation", manual:"Manual Approval Queue"}, cfg.manual_approval ? "manual" : "auto")}</select></label>
+          </div>
+          <div class="row" style="margin-top:14px"><button class="btn primary sm" data-act="lmsavecfg">${ic("check")}Apply Detection Settings</button>
+            <span class="sub">Weights: Chat Velocity 30% · Unique Chatters 15% · Emote Bursts 15% · Audio Excitement 20% · Transcript 10% · Agreement 10%</span></div>
         </div>
-        <div class="row" style="margin-top:14px"><button class="btn primary sm" data-act="lmsavecfg">${ic("check")}Apply Detection Settings</button>
-          <span class="sub">Weights: Chat Velocity 30% · Unique Chatters 15% · Emote Bursts 15% · Audio Excitement 20% · Transcript 10% · Agreement 10%</span></div>
-      </div>
-    </div>
-    ${liveJobs.length ? liveJobs.map(j => liveHtml(j)).join("") : `<div class="empty"><img src="/brand/favicon.svg" alt=""><b>No live streams currently connected</b>Paste a Twitch, Kick, or YouTube Live URL above and click Connect &amp; Monitor to start real-time chat, audio, and speech viral detection.</div>`}`;
-  const inp = $("#lm_url");
-  if (inp) inp.addEventListener("input", e => { S.monUrl = e.target.value; });
+      </div>`;
+    const inp = $("#lm_url", box);
+    if (inp) inp.addEventListener("input", e => {
+      S.monUrl = e.target.value;
+      const p = detectUrlPlat(S.monUrl);
+      const icEl = $("#lm_plat_ic", box);
+      if (icEl) icEl.innerHTML = p && PLAT[p] ? platLogo(p) : ic("link");
+    });
+  }
+  const liveJobs = S.jobs.filter(j => j.status === "live");
+  const pastLiveJobs = S.jobs.filter(j => j.kind === "live" && j.status !== "live");
+  const listEl = $("#lm_list", box);
+  if (listEl) {
+    put(listEl, (liveJobs.length || pastLiveJobs.length)
+      ? liveJobs.map(j => liveHtml(j)).join("") +
+        pastLiveJobs.map(j => `<section class="job" data-job="${j.id}">${jobHtml(j)}</section>`).join("")
+      : `<div class="empty"><img src="/brand/favicon.svg" alt=""><b>No live streams currently connected</b>Paste a Twitch, Kick, or YouTube Live URL above and click Connect &amp; Monitor to start real-time chat, audio, and speech viral detection.</div>`);
+  }
 }
 function jobHtml(j) {
   if (j.status === "live") return liveHtml(j);
@@ -2280,7 +2334,13 @@ document.addEventListener("click", async e => {
       S.status = await api("/api/status"); drawShell(); await drawSettings();
       return toast($("#ai_local_only")?.checked ? "Strict Local-Only Mode enabled. All external cloud AI requests are blocked." : "Local-Only lock disabled.", "ok");
     }
-    if (a === "lmtogglecfg") { S.monCfgOpen = !S.monCfgOpen; return drawMonitor(); }
+    if (a === "lmtogglecfg") {
+      S.monCfgOpen = !S.monCfgOpen;
+      const cEl = $("#lm_cfg");
+      if (cEl) cEl.style.display = S.monCfgOpen ? "block" : "none";
+      else drawMonitor(true);
+      return;
+    }
     if (a === "lmsavecfg") {
       const cfg = {
         sensitivity: $("#lm_sens")?.value || "medium",
@@ -2298,6 +2358,7 @@ document.addEventListener("click", async e => {
         try { await send(`/api/live/${j.id}/config`, cfg, "PUT"); } catch {}
       }
       toast("Detection settings applied.", "ok");
+      drawMonitor(true);
       return tick();
     }
     if (a === "lmstart") {
@@ -2305,12 +2366,30 @@ document.addEventListener("click", async e => {
       if (!url) { $("#lm_url")?.focus(); return toast("Paste a Twitch, Kick, or YouTube Live URL first.", "bad"); }
       b.disabled = true; const was = b.innerHTML; b.innerHTML = `<span class="rdot"></span>Connecting…`;
       try {
-        const j = await send("/api/live/monitor", {url, options: S.monCfg || {}});
-        if (j?.id && !jobOf(j.id)) S.jobs.unshift(j);
+        await startLiveMonitor(url);
         render();
         toast("Connected to live stream & chat! Monitoring for viral moments.", "ok");
       } finally { b.disabled = false; b.innerHTML = was; }
       return tick();
+    }
+    if (a === "quicklive") {
+      const url = d.url || att().liveUrl;
+      if (!url) return;
+      b.disabled = true; const was = b.innerHTML; b.innerHTML = `<span class="rdot"></span>Connecting…`;
+      try {
+        await startLiveMonitor(url);
+        att().liveUrl = null;
+        if ($("#url")) $("#url").value = "";
+        drawAtt();
+        toast("Connected to live stream & chat! Monitoring for viral moments.", "ok");
+        go("monitor");
+      } finally { b.disabled = false; b.innerHTML = was; }
+      return tick();
+    }
+    if (a === "clearlive") {
+      att().liveUrl = null;
+      if ($("#url")) $("#url").value = "";
+      return drawAtt();
     }
     if (a === "approvemom") {
       b.disabled = true;
@@ -2364,7 +2443,8 @@ document.addEventListener("click", async e => {
       dlg.returnValue = "no"; return dlg.showModal();
     }
     if (a === "copy") {
-      const c = jobOf(d.j).clips.find(x => x.id === d.c);
+      const c = jobOf(d.j)?.clips?.find(x => x.id === d.c);
+      if (!c) return;
       await navigator.clipboard.writeText(`${c.title}\n\n${c.description}\n\n${(c.hashtags || []).map(h => "#" + h).join(" ")}`); return toast("Post text copied", "ok");
     }
     if (a === "logout") { await api("/api/auth/logout", {method:"POST"}); location.href = "/"; return; }
@@ -2444,7 +2524,7 @@ document.addEventListener("click", async e => {
       toast("Recording stopped. Clips already made are kept.", "ok");
       api(`/api/live/${d.j}/stop`, {method:"POST"}).catch(e => toast(e.message, "bad")).finally(tick); return;
     }
-    if (a === "clipnow") { await send(`/api/live/${d.j}/clip`, {seconds:Number(d.s)}); return toast(`Clipping the last ${d.s} seconds…`, "ok"); }
+    if (a === "clipnow") { await send(`/api/live/${d.j}/clip`, {seconds:Number(d.s)}); toast(`Clipping the last ${d.s} seconds…`, "ok"); return tick(); }
     if (a === "resendverify") {
       b.disabled = true;
       try { const r = await send("/api/auth/resend-verification"); if (r.verified) { S.status = await api("/api/status"); drawShell(); return toast("Your email is already confirmed.", "ok"); }

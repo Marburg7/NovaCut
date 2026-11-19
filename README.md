@@ -17,65 +17,115 @@ Paste a YouTube, Twitch, or Kick link (or upload a file) and NovaCut Studio auto
 - **Optional External AI Providers.** Want to use cloud LLMs? Easily plug in Google Gemini, OpenAI (GPT-4o), xAI (Grok), Groq, Anthropic (Claude), OpenRouter, or local models via Ollama.
 - **Cyber Studio Dark UI.** Modern dark-mode dashboard with instant feedback, video scrubber, caption designer, and zero build steps.
 
-## Quick start
+## How to Run This Project
 
-You need Python 3.10 or newer and `ffmpeg`. On Windows: `winget install Gyan.FFmpeg`. On a Mac: `brew install ffmpeg`.
-On Linux: `sudo apt install ffmpeg`. NovaCut Studio finds it by itself and tells you in the dashboard if it is missing.
+### 1. Prerequisites
 
-```bash
-git clone https://github.com/Syed-Shahabuddin/novacut.git novacut
-```
+You need **Python 3.10 or newer** and **`ffmpeg`**:
 
-```bash
-cd novacut
-```
+- **macOS:** `brew install ffmpeg`
+- **Windows:** `winget install Gyan.FFmpeg`
+- **Linux (Ubuntu / Debian):** `sudo apt install ffmpeg`
 
-```bash
-pip install -r requirements.txt
-```
+NovaCut Studio locates `ffmpeg` automatically and alerts you in the dashboard if it is missing.
 
-Start the server:
+### 2. Clone & Install Dependencies
 
 ```bash
-python -m studio.server
+git clone https://github.com/Marburg7/NovaCut.git
+cd NovaCut
 ```
 
-The first start downloads the speech model by itself (about 480 MB, once).
+Create and activate a virtual environment, then install dependencies:
 
-Open http://127.0.0.1:8765. There is no sign-in: it opens straight into the dashboard. Go to **Settings, AI**, choose
-your AI service, paste your key and press **Save and test** (see [Choose your AI](#choose-your-ai)).
+- **macOS / Linux:**
+  ```bash
+  python3 -m venv .venv
+  source .venv/bin/activate
+  pip install -r requirements.txt
+  ```
+- **Windows (PowerShell / Command Prompt):**
+  ```bat
+  python -m venv .venv
+  .venv\Scripts\activate
+  pip install -r requirements.txt
+  ```
+
+### 3. (Optional) Pre-download the Local Speech Model
+
+On first startup, NovaCut automatically downloads the local speech recognition model (about 480 MB, once). To download it ahead of time:
+
+```bash
+python -m studio.fetch_model
+```
+
+### 4. Start NovaCut Studio
+
+Make sure your virtual environment is active, then start the server:
+
+- **macOS / Linux:**
+  ```bash
+  source .venv/bin/activate
+  python -m studio.server
+  ```
+  *(Or run directly without activating first: `.venv/bin/python -m studio.server`)*
+- **Windows:**
+  ```bat
+  .venv\Scripts\activate
+  python -m studio.server
+  ```
+  *(Or run directly: `.venv\Scripts\python -m studio.server`)*
+
+Open **http://127.0.0.1:8765** in your browser once you see `NovaCut Studio is running: http://127.0.0.1:8765`. There is no sign-in screen and **no external API key required** — the built-in **Antigravity AI** Autonomous Engine runs locally out of the box.
+
+To use a custom port or data directory (for videos, clips, and the database):
+
+```bash
+NOVACUT_PORT=8766 NOVACUT_DATA=./my_data .venv/bin/python -m studio.server
+```
+
+*(Both `NOVACUT_*` and legacy `PEAKCUT_*` environment variable prefixes are supported.)*
+
+### 5. Create Clips (Live Streams & Recorded Videos)
+
+- **Live Stream Clipping (Twitch, Kick, YouTube Live):**
+  - Open **Live Monitor** from the sidebar, paste a live stream URL (for example `https://twitch.tv/<channel>`, `https://kick.com/<channel>`, or `https://youtube.com/@<channel>/live`), and click **Connect & Monitor** — *or* paste a live channel URL directly on **Home** and click **Monitor Live Stream**.
+  - NovaCut records the live stream into a rolling buffer, tracks live chat velocity, emote bursts, audio loudness, and speech locally to auto-generate captioned **9:16** shorts, and lets you manually cut moments anytime with **Clip last 30s** or **Last 60s**.
+- **Video Clipping (VOD Links & Local Files):**
+  - On **Home**, paste a YouTube, Twitch, or Kick video URL — or click **Upload video** / drag and drop a video file (`.mp4`, `.mov`, `.mkv`, `.webm`, etc.).
+  - Open **Options** to pick clip length, layout (**Blurred fill**, **Zoomed in**, or **Fill screen**), and caption style (**Bounce**, **Hype**, or **Clean**), then click **Make clips**.
 
 ## Choose your AI
 
-NovaCut Studio needs a chat model that can return JSON. The easy way is in the dashboard: **Settings, AI**. Pick the
-service, paste your key, press **Find models** to choose from the service's own list, then **Save and test**. The
-key is kept in the data folder on your machine and is never shown again.
+NovaCut Studio comes with the **Antigravity AI (`antigravity`)** built-in engine active by default — **100% free with zero API keys**.
 
-If you prefer a file (or run a server), the same three things can go in `.env`. What is saved in the dashboard wins:
+If you want to connect an external cloud model or a local LLM instead, open **Settings → AI** in the dashboard, choose a provider, paste your key, press **Find models**, and click **Save and test**. Keys are stored locally in your data folder (`ai.json`).
+
+You can also configure AI providers in `.env` (using either `NOVACUT_*` or `PEAKCUT_*` variable names; settings saved in the dashboard take priority):
 
 ```ini
-PEAKCUT_AI_PROVIDER=gemini
-PEAKCUT_AI_MODELS=gemini-2.5-flash
-PEAKCUT_AI_KEY=your-key-here
+NOVACUT_AI_PROVIDER=antigravity
+# Or use an external provider, e.g.:
+# NOVACUT_AI_PROVIDER=gemini
+# NOVACUT_AI_MODELS=gemini-2.5-flash
+# NOVACUT_AI_KEY=your-key-here
 ```
 
-| `PEAKCUT_AI_PROVIDER` | Service | Where to get a key |
+| `NOVACUT_AI_PROVIDER` / `PEAKCUT_AI_PROVIDER` | Service | Key / Notes |
 |---|---|---|
+| `antigravity` *(default)* | Built-in Autonomous Engine | **Free, no key needed** (runs 100% locally) |
 | `gemini` | Google Gemini | https://aistudio.google.com/apikey |
 | `openai` | OpenAI | https://platform.openai.com/api-keys |
 | `xai` | Grok (xAI) | https://console.x.ai |
 | `groq` | Groq | https://console.groq.com/keys |
 | `openrouter` | OpenRouter (many models, one key) | https://openrouter.ai/keys |
 | `anthropic` | Claude | https://console.anthropic.com |
-| `ollama` | A model on your own machine, no key | https://ollama.com |
-| `custom` | Any OpenAI-compatible address: also set `PEAKCUT_AI_BASE_URL` | |
+| `ollama` | Local model via Ollama | https://ollama.com (no key needed) |
+| `custom` | Any OpenAI-compatible endpoint | Also set `NOVACUT_AI_BASE_URL` / `PEAKCUT_AI_BASE_URL` |
 
-- `PEAKCUT_AI_MODELS` is the model id exactly as the service names it. Model names change often, so check the
-  service's current list. Several ids separated by commas are tried in order, which gives you a fallback.
-- A fast, inexpensive model is the right choice. A one-hour video is read in about four requests.
-- You pay the AI service directly for what you use. The **AI usage** page in the app shows how many requests and
-  tokens each video took.
-- Speech to text does not use the AI service. It runs on your own machine, so audio never leaves it.
+- `NOVACUT_AI_MODELS` (or `PEAKCUT_AI_MODELS`) accepts one or more comma-separated model IDs, tried in order as fallbacks.
+- When using external providers, a fast chat model that returns JSON works best, and the **AI usage** page tracks calls and token counts.
+- Speech-to-text always runs locally on your own machine with `sherpa-onnx`, so audio never leaves your computer.
 
 ## Settings
 
@@ -156,12 +206,19 @@ docker compose up -d --build
 
 ## Tests
 
+Run the full integration test suite:
+
 ```bash
 python tests/run.py
 ```
 
-This starts a copy of the app on a spare port with an empty temporary data folder, runs the permission, abuse and
-queue tests against it, then removes it. It needs no keys and never touches real data.
+Run the autonomous live stream & viral detection test suite:
+
+```bash
+python tests/test_autonomous_live.py
+```
+
+`tests/run.py` starts a temporary copy of the app on a spare port with an empty data folder, runs permission, abuse, storage, AI, and queue tests against it, then cleans up. Both suites run completely locally with zero API keys and never touch real user data.
 
 ## Security
 

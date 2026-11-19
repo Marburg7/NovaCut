@@ -40,10 +40,14 @@ def _ws_send_text(sock, payload: str):
     sock.sendall(bytes(header) + masked)
 
 
-def _ws_recv_frame(sock) -> tuple[int, bytes]:
+def _ws_recv_frame(sock, pending: bytearray = None) -> tuple[int, bytes]:
     """Read one RFC 6455 WebSocket frame. Returns (opcode, payload_bytes)."""
     def read_exact(k: int) -> bytes:
         buf = bytearray()
+        if pending:
+            take = min(k, len(pending))
+            buf.extend(pending[:take])
+            del pending[:take]
         while len(buf) < k:
             chunk = sock.recv(k - len(buf))
             if not chunk:
@@ -185,8 +189,10 @@ class KickAdapter(PlatformAdapter):
                     if not chunk:
                         raise ConnectionError("Kick Pusher handshake failed")
                     resp += chunk
-                if b" 101 " not in resp.split(b"\r\n", 1)[0]:
+                head, leftover = resp.split(b"\r\n\r\n", 1)
+                if b" 101 " not in head.split(b"\r\n", 1)[0]:
                     raise ConnectionError("Kick Pusher rejected WebSocket upgrade")
+                pending = bytearray(leftover)
                 sub = json.dumps({
                     "event": "pusher:subscribe",
                     "data": {"auth": "", "channel": f"chatrooms.{chatroom_id}.v2"},
@@ -197,7 +203,7 @@ class KickAdapter(PlatformAdapter):
                 backoff = 2.0
                 while not stop_event.is_set():
                     try:
-                        opcode, payload = _ws_recv_frame(sock)
+                        opcode, payload = _ws_recv_frame(sock, pending)
                     except socket.timeout:
                         _ws_send_text(sock, json.dumps({"event": "pusher:ping", "data": {}}))
                         continue
